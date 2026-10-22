@@ -8,6 +8,8 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <ostream>
 #include <thread>
 #include <vector>
 #include <ylt/util/tl/expected.hpp>
@@ -29,6 +31,29 @@
 #include "pinned_buffer_pool.h"
 
 namespace mooncake {
+
+// Synchronous diagnostic context only; storage and access live in the core
+// library so Python bindings and Client use the same thread-local instance.
+// The trace string must outlive the scope. Scopes cannot cross threads.
+class ScopedBatchPutTrace {
+   public:
+    explicit ScopedBatchPutTrace(std::string_view trace_id);
+    ~ScopedBatchPutTrace() noexcept;
+    ScopedBatchPutTrace(const ScopedBatchPutTrace&) = delete;
+    ScopedBatchPutTrace& operator=(const ScopedBatchPutTrace&) = delete;
+
+   private:
+    std::string_view previous_;
+};
+
+std::string_view CurrentBatchPutTrace() noexcept;
+
+// Emits nothing outside a trace, preserving the legacy timing log format.
+struct BatchPutTraceLogSuffix {
+    std::string_view path;
+    std::string_view timing_scope;
+};
+std::ostream& operator<<(std::ostream& out, BatchPutTraceLogSuffix suffix);
 
 class PutOperation;
 

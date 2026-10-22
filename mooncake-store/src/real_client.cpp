@@ -4669,6 +4669,18 @@ std::vector<int> RealClient::batch_put_from_multi_buffers(
     return results;
 }
 
+std::vector<int> RealClient::batch_put_from_multi_buffers_with_trace(
+    const std::vector<std::string> &keys,
+    const std::vector<std::vector<void *>> &all_buffers,
+    const std::vector<std::vector<size_t>> &all_sizes,
+    const ReplicateConfig &config, std::string_view trace_context) {
+    // Diagnostic-only: set the thread-local trace id so the existing
+    // BatchPutTiming logs gain a trace suffix, then invoke the original
+    // put exactly once. No RPC payload or storage layout changes.
+    ScopedBatchPutTrace trace(trace_context);
+    return batch_put_from_multi_buffers(keys, all_buffers, all_sizes, config);
+}
+
 std::vector<tl::expected<void, ErrorCode>>
 RealClient::batch_put_from_multi_buffers_internal(
     const std::vector<std::string> &keys,

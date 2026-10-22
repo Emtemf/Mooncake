@@ -2633,6 +2633,38 @@ PYBIND11_MODULE(store, m) {
             "multiple "
             "keys")
         .def(
+            "supports_batch_put_trace",
+            [](const MooncakeStorePyWrapper &self) {
+                return self.is_client_initialized() &&
+                       !self.use_dummy_client_ &&
+                       dynamic_cast<RealClient *>(self.store_.get()) != nullptr;
+            },
+            "Whether this initialized RealClient supports local put tracing")
+        .def(
+            "batch_put_from_multi_buffers_with_trace",
+            [](MooncakeStorePyWrapper &self,
+               const std::vector<std::string> &keys,
+               const std::vector<std::vector<uintptr_t>> &all_buffer_ptrs,
+               const std::vector<std::vector<size_t>> &all_sizes,
+               const ReplicateConfig &config, const std::string &trace_context) {
+                auto *real_client =
+                    dynamic_cast<RealClient *>(self.store_.get());
+                if (self.use_dummy_client_ || !real_client ||
+                    !self.is_client_initialized()) {
+                    throw std::runtime_error(
+                        "batch_put_from_multi_buffers_with_trace requires an "
+                        "initialized RealClient; DummyClient is unsupported");
+                }
+                py::gil_scoped_release release;
+                return real_client->batch_put_from_multi_buffers_with_trace(
+                    keys, CastAddrs2Ptrs(all_buffer_ptrs), all_sizes, config,
+                    trace_context);
+            },
+            py::arg("keys"), py::arg("all_buffer_ptrs"), py::arg("all_sizes"),
+            py::arg("config"), py::arg("trace_context"),
+            "Put once with a local diagnostic trace ID; no context is sent "
+            "over RPC. DummyClient is unsupported.")
+        .def(
             "batch_get_into_multi_buffers",
             [](MooncakeStorePyWrapper &self,
                const std::vector<std::string> &keys,

@@ -235,6 +235,13 @@ class RealClient : public PyClient {
         const std::vector<std::vector<size_t>> &all_sizes,
         const ReplicateConfig &config = ReplicateConfig{});
 
+    // Diagnostic-only wrapper; invokes the original put exactly once.
+    std::vector<int> batch_put_from_multi_buffers_with_trace(
+        const std::vector<std::string> &keys,
+        const std::vector<std::vector<void *>> &all_buffers,
+        const std::vector<std::vector<size_t>> &all_sizes,
+        const ReplicateConfig &config, std::string_view trace_context);
+
     int put_parts(const std::string &key,
                   std::vector<std::span<const char>> values,
                   const ReplicateConfig &config = ReplicateConfig{});
