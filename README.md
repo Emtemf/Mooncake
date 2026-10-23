@@ -193,6 +193,25 @@ Mooncake Store is a distributed KVCache storage engine specialized for LLM infer
 
 - **High bandwidth utilization**: Mooncake Store supports striping and parallel I/O transfer of large objects, fully utilizing multi-NIC aggregated bandwidth for high-speed data reads and writes.
 
+#### Optional local batch-put tracing
+
+After rebuilding the core library and Python bindings together,
+`supports_batch_put_trace()` reports whether a Store has an initialized
+RealClient. The additional method
+`batch_put_from_multi_buffers_with_trace(keys, all_buffer_ptrs, all_sizes,
+config, trace_context)` accepts a diagnostic ID of 1–256 non-whitespace
+printable ASCII characters. It rejects DummyClient and uninitialized clients
+before any put, then calls the original put exactly once inside a synchronous,
+thread-local scope. Nested scopes and exceptions restore the previous ID.
+No trace metadata is added to RPCs, cache keys, or replication configuration.
+
+Existing `BatchPutTiming` lines gain `trace_id`, `path`, and `timing_scope`
+only during that call. The old API retains its old log text. `normal_full`
+covers phases 1–4; `prefer_same_node_phase1` and
+`prefer_same_node_remaining` are separate ranges sharing the same trace ID.
+The latter total excludes phase 1; neither range covers the entire Python
+call or proves wire throughput. Do not add nested Python/native durations.
+
 ### SGLang Integration ([Guide](https://kvcache-ai.github.io/Mooncake/getting_started/examples/sglang-integration/hicache-integration-v1.html))
 
 SGLang officially supports Mooncake Store as a [HiCache storage backend](https://lmsys.org/blog/2025-09-10-sglang-hicache/). This integration enables scalable KV cache retention and high-performance access for large-scale LLM serving scenarios.

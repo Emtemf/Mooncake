@@ -1,4 +1,5 @@
 #include "client_service.h"
+#include "batch_put_trace.h"
 
 #include <glog/logging.h>
 
@@ -16,6 +17,7 @@
 #include <ranges>
 #include <thread>
 #include <set>
+#include <stdexcept>
 #include <ylt/struct_json/json_reader.h>
 
 #include "transfer_engine.h"
@@ -32,6 +34,37 @@
 #include "gpu_staging_utils.h"
 
 namespace mooncake {
+
+namespace {
+thread_local std::string_view batch_put_trace_id;
+}
+
+ScopedBatchPutTrace::ScopedBatchPutTrace(std::string_view trace_id)
+    : previous_(batch_put_trace_id) {
+    if (trace_id.empty() || trace_id.size() > 256 ||
+        !std::all_of(trace_id.begin(), trace_id.end(), [](unsigned char c) {
+            return c >= 0x21 && c <= 0x7e;
+        })) {
+        throw std::invalid_argument(
+            "trace_context must be 1-256 non-whitespace printable ASCII characters");
+    }
+    batch_put_trace_id = trace_id;
+}
+
+ScopedBatchPutTrace::~ScopedBatchPutTrace() noexcept {
+    batch_put_trace_id = previous_;
+}
+
+std::string_view CurrentBatchPutTrace() noexcept { return batch_put_trace_id; }
+
+std::ostream& operator<<(std::ostream& out, BatchPutTraceLogSuffix suffix) {
+    const auto trace_id = CurrentBatchPutTrace();
+    if (!trace_id.empty()) {
+        out << " trace_id=" << trace_id << " path=" << suffix.path
+            << " timing_scope=" << suffix.timing_scope;
+    }
+    return out;
+}
 
 using gpu_staging::CopyDeviceToHost;
 using gpu_staging::IsDevicePointer;
@@ -2048,7 +2081,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPutWhenPreferSameNode(
                                    after_wait_transfers)
               << " phase4_finalize_batch_put_us="
               << DurationUsBetween(after_wait_transfers, batch_end)
-              << " total_us=" << DurationUsBetween(t0, batch_end);
+              << " total_us=" << DurationUsBetween(t0, batch_end)
+              << BatchPutTraceLogSuffix{"BatchPutWhenPreferSameNode",
+                                        "prefer_same_node_remaining"};
     return CollectResults(ops);
 }
 
@@ -2073,7 +2108,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
         const auto after_start_batch_put = std::chrono::steady_clock::now();
         LOG(INFO) << "[BatchPutTiming][prefer_same_node] keys=" << keys.size()
                   << " phase1_start_batch_put_us="
-                  << DurationUsBetween(prefer_begin, after_start_batch_put);
+                  << DurationUsBetween(prefer_begin, after_start_batch_put)
+                  << BatchPutTraceLogSuffix{"BatchPut", "prefer_same_node_phase1"};
         return BatchPutWhenPreferSameNode(ops);
     }
 
@@ -2112,7 +2148,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
                                    after_wait_transfers)
               << " phase4_finalize_batch_put_us="
               << DurationUsBetween(after_wait_transfers, batch_end)
-              << " total_us=" << DurationUsBetween(batch_begin, batch_end);
+              << " total_us=" << DurationUsBetween(batch_begin, batch_end)
+              << BatchPutTraceLogSuffix{"BatchPut", "normal_full"};
 
     return CollectResults(ops);
 }

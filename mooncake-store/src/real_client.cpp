@@ -1,3 +1,5 @@
+#include "batch_put_trace.h"
+
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -4667,6 +4669,15 @@ std::vector<int> RealClient::batch_put_from_multi_buffers(
     }
 
     return results;
+}
+
+std::vector<int> RealClient::batch_put_from_multi_buffers_with_trace(
+    const std::vector<std::string> &keys,
+    const std::vector<std::vector<void *>> &all_buffers,
+    const std::vector<std::vector<size_t>> &all_sizes,
+    const ReplicateConfig &config, std::string_view trace_context) {
+    ScopedBatchPutTrace trace(trace_context);
+    return batch_put_from_multi_buffers(keys, all_buffers, all_sizes, config);
 }
 
 std::vector<tl::expected<void, ErrorCode>>
