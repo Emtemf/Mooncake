@@ -402,6 +402,14 @@ FinalizeDecision DetermineFinalizeDecision(
     return slice_size;
 }
 
+[[nodiscard]] uint64_t DurationUsBetween(
+    std::chrono::steady_clock::time_point start,
+    std::chrono::steady_clock::time_point end) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start)
+            .count());
+}
+
 Client::Client(const std::string& local_hostname,
                const std::string& metadata_connstring,
                const std::string& protocol,
@@ -3361,7 +3369,9 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchWriteWhenPreferSameNode(
                     << " transfers for key " << merged_ops.back().key;
         }
     }
+    const auto after_submit_transfers = std::chrono::steady_clock::now();
     WaitForTransfers(merged_ops);
+    const auto after_wait_transfers = std::chrono::steady_clock::now();
     for (auto& op : merged_ops) {
         auto& memory_descriptor = op.replicas[0].get_memory_descriptor();
         auto& buffer_descriptor = memory_descriptor.buffer_descriptor;
@@ -3399,6 +3409,23 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchWriteWhenPreferSameNode(
     } else {
         FinalizeBatchPut(ops);
     }
+    const auto batch_end = std::chrono::steady_clock::now();
+
+    uint64_t total_bytes = 0;
+    for (const auto& op : ops) {
+        for (const auto& slice : op.slices) {
+            total_bytes += slice.size;
+        }
+    }
+    LOG(INFO) << "[BatchPutTiming][prefer_same_node] keys=" << ops.size()
+              << " bytes=" << total_bytes << " phase2_submit_transfers_us="
+              << DurationUsBetween(t0, after_submit_transfers)
+              << " phase3_wait_transfers_us="
+              << DurationUsBetween(after_submit_transfers,
+                                   after_wait_transfers)
+              << " phase4_finalize_batch_put_us="
+              << DurationUsBetween(after_wait_transfers, batch_end)
+              << " total_us=" << DurationUsBetween(t0, batch_end);
     return CollectResults(ops);
 }
 
@@ -3424,70 +3451,58 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
             return std::vector<tl::expected<void, ErrorCode>>(
                 keys.size(), tl::unexpected(*err));
         }
+        const auto prefer_begin = std::chrono::steady_clock::now();
         StartBatchPut(ops, client_cfg);
+        const auto after_start_batch_put = std::chrono::steady_clock::now();
+        LOG(INFO) << "[BatchPutTiming][prefer_same_node] keys=" << keys.size()
+                  << " phase1_start_batch_put_us="
+                  << DurationUsBetween(prefer_begin, after_start_batch_put);
         StageWriteBuffersForRemoteReplicas(ops, stager);
         return BatchWriteWhenPreferSameNode(ops, false);
     }
+
+    uint64_t total_bytes = 0;
+    for (const auto& op : ops) {
+        for (const auto& slice : op.slices) {
+            total_bytes += slice.size;
+        }
+    }
+
+    const auto batch_begin = std::chrono::steady_clock::now();
     StartBatchPut(ops, client_cfg);
     StageWriteBuffersForRemoteReplicas(ops, stager);
+    const auto after_start_batch_put = std::chrono::steady_clock::now();
 
-    auto t0 = std::chrono::steady_clock::now();
+    auto t0 = after_start_batch_put;
     SubmitTransfers(ops);
+    const auto after_submit_transfers = std::chrono::steady_clock::now();
     WaitForTransfers(ops);
     SubmitDfsWrites(ops);
+    const auto after_wait_transfers = std::chrono::steady_clock::now();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                  std::chrono::steady_clock::now() - t0)
+                  after_wait_transfers - t0)
                   .count();
     if (metrics_) {
         metrics_->transfer_metric.batch_put_latency_us.observe(us);
     }
 
     FinalizeBatchPut(ops);
+    const auto batch_end = std::chrono::steady_clock::now();
+
+    LOG(INFO) << "[BatchPutTiming] keys=" << keys.size()
+              << " bytes=" << total_bytes << " phase1_start_batch_put_us="
+              << DurationUsBetween(batch_begin, after_start_batch_put)
+              << " phase2_submit_transfers_us="
+              << DurationUsBetween(after_start_batch_put,
+                                   after_submit_transfers)
+              << " phase3_wait_transfers_us="
+              << DurationUsBetween(after_submit_transfers,
+                                   after_wait_transfers)
+              << " phase4_finalize_batch_put_us="
+              << DurationUsBetween(after_wait_transfers, batch_end)
+              << " total_us=" << DurationUsBetween(batch_begin, batch_end);
+
     return CollectResults(ops);
-}
-
-std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
-Client::StartBatchPutForSizes(const std::vector<std::string>& keys,
-                              const std::vector<uint64_t>& object_sizes,
-                              const ReplicateConfig& config) {
-    std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
-        results(keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
-    if (keys.size() != object_sizes.size()) {
-        LOG(ERROR) << "StartBatchPutForSizes size mismatch: keys="
-                   << keys.size() << ", sizes=" << object_sizes.size();
-        return results;
-    }
-
-    ReplicateConfig client_cfg = AttachHostId(config);
-    if (protocol_ == "cxl") {
-        client_cfg.preferred_segment = local_hostname_;
-    }
-
-    std::vector<std::vector<Slice>> batched_slices(keys.size());
-    for (size_t i = 0; i < keys.size(); ++i) {
-        batched_slices[i] = {Slice{nullptr, object_sizes[i]}};
-    }
-    std::vector<PutOperation> ops = CreatePutOperations(keys, batched_slices);
-    StartBatchPut(ops, client_cfg);
-
-    for (size_t i = 0; i < ops.size(); ++i) {
-        if (ops[i].IsResolved()) {
-            results[i] = tl::unexpected(ops[i].result.error());
-            continue;
-        }
-        results[i] = std::move(ops[i].replicas);
-    }
-    return results;
-}
-
-std::vector<tl::expected<void, ErrorCode>> Client::BatchPutEnd(
-    const std::vector<ObjectMeta>& object_metas, ReplicaType replica_type) {
-    return master_client_.BatchPutEnd(object_metas, replica_type);
-}
-
-std::vector<tl::expected<void, ErrorCode>> Client::BatchPutRevoke(
-    const std::vector<std::string>& keys, ReplicaType replica_type) {
-    return master_client_.BatchPutRevoke(keys, replica_type);
 }
 
 tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key, bool force) {
