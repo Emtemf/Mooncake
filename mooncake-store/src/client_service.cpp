@@ -3505,6 +3505,50 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     return CollectResults(ops);
 }
 
+std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+Client::StartBatchPutForSizes(const std::vector<std::string>& keys,
+                              const std::vector<uint64_t>& object_sizes,
+                              const ReplicateConfig& config) {
+    std::vector<tl::expected<std::vector<Replica::Descriptor>, ErrorCode>>
+        results(keys.size(), tl::unexpected(ErrorCode::INVALID_PARAMS));
+    if (keys.size() != object_sizes.size()) {
+        LOG(ERROR) << "StartBatchPutForSizes size mismatch: keys="
+                   << keys.size() << ", sizes=" << object_sizes.size();
+        return results;
+    }
+
+    ReplicateConfig client_cfg = AttachHostId(config);
+    if (protocol_ == "cxl") {
+        client_cfg.preferred_segment = local_hostname_;
+    }
+
+    std::vector<std::vector<Slice>> batched_slices(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i) {
+        batched_slices[i] = {Slice{nullptr, object_sizes[i]}};
+    }
+    std::vector<PutOperation> ops = CreatePutOperations(keys, batched_slices);
+    StartBatchPut(ops, client_cfg);
+
+    for (size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].IsResolved()) {
+            results[i] = tl::unexpected(ops[i].result.error());
+            continue;
+        }
+        results[i] = std::move(ops[i].replicas);
+    }
+    return results;
+}
+
+std::vector<tl::expected<void, ErrorCode>> Client::BatchPutEnd(
+    const std::vector<ObjectMeta>& object_metas, ReplicaType replica_type) {
+    return master_client_.BatchPutEnd(object_metas, replica_type);
+}
+
+std::vector<tl::expected<void, ErrorCode>> Client::BatchPutRevoke(
+    const std::vector<std::string>& keys, ReplicaType replica_type) {
+    return master_client_.BatchPutRevoke(keys, replica_type);
+}
+
 tl::expected<void, ErrorCode> Client::Remove(const ObjectKey& key, bool force) {
     if (hot_cache_) {
         hot_cache_->BumpKeyGeneration(key);
