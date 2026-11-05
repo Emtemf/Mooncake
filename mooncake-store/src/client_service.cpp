@@ -3417,7 +3417,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchWriteWhenPreferSameNode(
             total_bytes += slice.size;
         }
     }
-    LOG(INFO) << "[BatchPutTiming][prefer_same_node] keys=" << ops.size()
+    LOG(INFO) << (is_upsert ? "[BatchUpsertTiming]" : "[BatchPutTiming]")
+              << "[prefer_same_node] keys=" << ops.size()
               << " bytes=" << total_bytes << " phase2_submit_transfers_us="
               << DurationUsBetween(t0, after_submit_transfers)
               << " phase3_wait_transfers_us="
@@ -3425,7 +3426,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchWriteWhenPreferSameNode(
                                    after_wait_transfers)
               << " phase4_finalize_batch_put_us="
               << DurationUsBetween(after_wait_transfers, batch_end)
-              << " total_us=" << DurationUsBetween(t0, batch_end);
+              << " total_us=" << DurationUsBetween(t0, batch_end)
+              << " timing_scope=prefer_same_node_remaining";
     return CollectResults(ops);
 }
 
@@ -3453,11 +3455,12 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
         }
         const auto prefer_begin = std::chrono::steady_clock::now();
         StartBatchPut(ops, client_cfg);
+        StageWriteBuffersForRemoteReplicas(ops, stager);
         const auto after_start_batch_put = std::chrono::steady_clock::now();
         LOG(INFO) << "[BatchPutTiming][prefer_same_node] keys=" << keys.size()
                   << " phase1_start_batch_put_us="
-                  << DurationUsBetween(prefer_begin, after_start_batch_put);
-        StageWriteBuffersForRemoteReplicas(ops, stager);
+                  << DurationUsBetween(prefer_begin, after_start_batch_put)
+                  << " timing_scope=phase1_only";
         return BatchWriteWhenPreferSameNode(ops, false);
     }
 
@@ -3473,14 +3476,14 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
     StageWriteBuffersForRemoteReplicas(ops, stager);
     const auto after_start_batch_put = std::chrono::steady_clock::now();
 
-    auto t0 = after_start_batch_put;
+    auto t0 = std::chrono::steady_clock::now();
     SubmitTransfers(ops);
     const auto after_submit_transfers = std::chrono::steady_clock::now();
     WaitForTransfers(ops);
     SubmitDfsWrites(ops);
     const auto after_wait_transfers = std::chrono::steady_clock::now();
     auto us = std::chrono::duration_cast<std::chrono::microseconds>(
-                  after_wait_transfers - t0)
+                  std::chrono::steady_clock::now() - t0)
                   .count();
     if (metrics_) {
         metrics_->transfer_metric.batch_put_latency_us.observe(us);
@@ -3500,7 +3503,8 @@ std::vector<tl::expected<void, ErrorCode>> Client::BatchPut(
                                    after_wait_transfers)
               << " phase4_finalize_batch_put_us="
               << DurationUsBetween(after_wait_transfers, batch_end)
-              << " total_us=" << DurationUsBetween(batch_begin, batch_end);
+              << " total_us=" << DurationUsBetween(batch_begin, batch_end)
+              << " timing_scope=normal_full";
 
     return CollectResults(ops);
 }

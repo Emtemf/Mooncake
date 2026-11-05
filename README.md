@@ -130,6 +130,25 @@ Mooncake Store is a high-performance distributed key-value cache storage engine 
 
 - **Broad ecosystem adoption.** Mooncake Store is used across the LLM systems ecosystem as a high-performance distributed storage backend for KV caches, hidden states, and model weights. It supports integrations with [SGLang's Hierarchical KV Caching](https://lmsys.org/blog/2025-09-10-sglang-hicache/), [vLLM's prefill serving](https://docs.vllm.ai/en/latest/features/disagg_prefill.html), and [LMCache](https://kvcache-ai.github.io/Mooncake/deployment/integrations/lmcache/index.html), and has been adopted by systems such as [TorchSpec](https://pytorch.org/blog/torchspec-speculative-decoding-training-at-scale/) and [TransferQueue](https://github.com/Ascend/TransferQueue) to decouple inference, training, and reinforcement-learning workloads through efficient state management and asynchronous data movement.
 
+#### Store timing diagnostics
+
+This instrumentation branch adds INFO-level `[BatchPutTiming]` observations
+without changing the original calls, results, or native metric expressions.
+The shared prefer-same-node write path uses `[BatchUpsertTiming]` for Upsert.
+
+| `timing_scope` | Measured range |
+| --- | --- |
+| `normal_full` | `StartBatchPut` through `FinalizeBatchPut`, in four phases. Phase 1 includes buffer staging; phase 3 includes `SubmitDfsWrites`. |
+| `phase1_only` | Prefer-same-node `StartBatchPut` and buffer staging. No `total_us` is emitted for this record. |
+| `prefer_same_node_remaining` | Grouping/submission, transfer wait, and result propagation/DFS writes/finalization. `total_us` covers only these phases 2–4, not phase 1. |
+
+These host intervals end before result collection and their timing-log emission;
+they are not full API latency or additive TTFT components. `keys` and `bytes`
+describe operation counts and slice lengths, not successful transfers or measured
+wire traffic.
+Interrupted calls may lack completion records. Clock reads, slice counting, and
+logging add overhead; they do not introduce transfers, retries, or device waits.
+
 </details>
 
 ### Mooncake EP and Process Group (PG)
