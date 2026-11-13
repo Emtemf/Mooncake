@@ -222,3 +222,35 @@ running.
 Set `MC_STORE_CLIENT_METRIC=0` to disable client metric collection. If the
 client HTTP server remains enabled while metrics are disabled, `/metrics` and
 `/metrics/summary` return HTTP 503 with `metrics not available`.
+
+## Native Batch Write Timing
+
+Each completed `Client::BatchPut` or `Client::BatchUpsert` invocation emits one
+`[BatchPutTiming]` or `[BatchUpsertTiming]` line. The forwarding overload does not
+emit a second line. Records carry `keys`, `bytes`, four microsecond phase fields,
+`total_us`, `timing_scope`, `status`, `complete`, and `failed_keys`.
+Clocks use `steady_clock`; durations are converted directly to integer
+microseconds without rounding intermediate time points.
+
+| Field | `normal_full` | `prefer_same_node_full` |
+|-------|---------------|------------------------|
+| `phase1_start_batch_put_us` | StartBatchPut/StartBatchUpsert and buffer staging | Same caller-side boundaries |
+| `phase2_submit_transfers_us` | End of phase 1 through SubmitTransfers | Helper entry through grouping and merged transfer submission |
+| `phase3_wait_transfers_us` | WaitForTransfers and SubmitDfsWrites | WaitForTransfers on merged operations only |
+| `phase4_finalize_batch_put_us` | Native metric observation and finalization | Result propagation to original operations, SubmitDfsWrites, native metric observation, and finalization |
+
+The historical field names are shared by Put and Upsert; they do not imply
+identical work in both timing scopes. `total_us` spans the original phase-1
+start through finalization, including the caller/helper gap in the preferred-node
+path. It is an outer range, not a fifth phase. Configuration, operation creation,
+checksum computation, summary logging, and CollectResults are outside that range.
+The original native latency metric keeps its existing boundaries and placement.
+
+`status` describes the final per-key results (`ok` or `error`); an already-existing
+object is successful for Put, matching CollectResults. `complete=true` means all
+four clock ranges were measured, not that all keys succeeded. Configuration
+rejection before phase 1 emits one `status=error complete=false` record with
+`timing_scope=prefer_same_node_not_started`, `phase_status=not_started`, keys and
+bytes, and no fabricated phase/total durations. An exception escaping the call
+does not produce a completed timing record. No partial-phase timing lines or
+time/log-neighbor reconstruction are used.

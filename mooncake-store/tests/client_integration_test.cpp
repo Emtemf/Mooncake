@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <sstream>
 #include <vector>
 #include <regex>
 #include <unordered_set>
@@ -134,6 +135,29 @@ class ClientIdCaptureSink : public google::LogSink {
             }
         }
     }
+};
+
+class BatchWriteTimingCaptureSink : public google::LogSink {
+   public:
+    BatchWriteTimingCaptureSink() { google::AddLogSink(this); }
+    ~BatchWriteTimingCaptureSink() override { google::RemoveLogSink(this); }
+
+    void send(google::LogSeverity, const char*, const char*, int,
+              const struct ::tm*, const char* message,
+              size_t message_len) override {
+        // Other client/background threads must not mutate this call's capture.
+        if (std::this_thread::get_id() != owner_) return;
+        std::string_view text(message, message_len);
+        if (text.find("[BatchPutTiming]") != std::string_view::npos ||
+            text.find("[BatchUpsertTiming]") != std::string_view::npos) {
+            records.emplace_back(text);
+        }
+    }
+
+    std::vector<std::string> records;
+
+   private:
+    const std::thread::id owner_ = std::this_thread::get_id();
 };
 
 class ClientIntegrationTest : public ::testing::Test {
@@ -638,6 +662,115 @@ TEST_F(ClientIntegrationTest, BatchWriteStagesActualNonLocalAllocation) {
     for (const auto& [ptr, size] : staged_allocations) {
         client_buffer_allocator_->deallocate(ptr, size);
     }
+}
+
+TEST_F(ClientIntegrationTest, BatchWriteTimingHasOneCompletedRecordPerCall) {
+    const std::string value = "native batch timing";
+    void* buffer = client_buffer_allocator_->allocate(value.size());
+    ASSERT_NE(buffer, nullptr);
+    std::memcpy(buffer, value.data(), value.size());
+    std::vector<std::vector<Slice>> slices{{{buffer, value.size()}}};
+    const std::array<const char*, 4> stages{
+        "phase1_start_batch_put_us", "phase2_submit_transfers_us",
+        "phase3_wait_transfers_us", "phase4_finalize_batch_put_us"};
+    auto parse = [](const std::string& record) {
+        std::unordered_map<std::string, std::string> fields;
+        std::istringstream stream(record);
+        std::string token;
+        while (stream >> token) {
+            auto separator = token.find('=');
+            if (separator != std::string::npos) {
+                fields.emplace(token.substr(0, separator),
+                               token.substr(separator + 1));
+            }
+        }
+        return fields;
+    };
+
+    for (bool prefer_same_node : {false, true}) {
+        ReplicateConfig config;
+        config.preferred_segment = "localhost:17812";
+        config.prefer_alloc_in_same_node = prefer_same_node;
+        const std::vector<ObjectKey> keys{
+            prefer_same_node ? "native_timing_prefer" : "native_timing_normal"};
+        // The repeated put is successful even when its native result is
+        // OBJECT_ALREADY_EXISTS. Each invocation still owns exactly one record.
+        for (bool upsert : {false, false, true}) {
+            BatchWriteTimingCaptureSink sink;
+            auto results = upsert ? test_client_->BatchUpsert(keys, slices, config)
+                                  : test_client_->BatchPut(keys, slices, config);
+            ASSERT_EQ(results.size(), 1);
+            ASSERT_TRUE(results[0]);
+            ASSERT_EQ(sink.records.size(), 1);
+            const auto& record = sink.records[0];
+            EXPECT_EQ(record.find(upsert ? "[BatchUpsertTiming]"
+                                         : "[BatchPutTiming]"),
+                      0);
+            auto fields = parse(record);
+            EXPECT_EQ(fields.at("keys"), "1");
+            EXPECT_EQ(fields.at("bytes"), std::to_string(value.size()));
+            EXPECT_EQ(fields.at("status"), "ok");
+            EXPECT_EQ(fields.at("complete"), "true");
+            EXPECT_EQ(fields.at("failed_keys"), "0");
+            EXPECT_EQ(fields.at("timing_scope"),
+                      prefer_same_node ? "prefer_same_node_full" : "normal_full");
+            uint64_t stage_total = 0;
+            for (const auto* stage : stages) {
+                ASSERT_EQ(fields.count(stage), 1);
+                stage_total += std::stoull(fields.at(stage));
+            }
+            EXPECT_LE(stage_total, std::stoull(fields.at("total_us")));
+        }
+        EXPECT_TRUE(test_client_->Remove(keys[0], true));
+
+        const std::vector<ObjectKey> failed_keys{
+            prefer_same_node ? "native_timing_failed_prefer"
+                             : "native_timing_failed_normal"};
+        Client::WriteBufferStager fail_staging =
+            [](const std::vector<Slice>&)
+            -> tl::expected<std::vector<Slice>, ErrorCode> {
+            return tl::unexpected(ErrorCode::INVALID_PARAMS);
+        };
+        for (bool upsert : {false, true}) {
+            BatchWriteTimingCaptureSink sink;
+            auto results =
+                upsert ? test_client_->BatchUpsert(failed_keys, slices, config,
+                                                   fail_staging)
+                       : test_client_->BatchPut(failed_keys, slices, config,
+                                                fail_staging);
+            ASSERT_EQ(results.size(), 1);
+            ASSERT_FALSE(results[0]);
+            EXPECT_EQ(results[0].error(), ErrorCode::INVALID_PARAMS);
+            ASSERT_EQ(sink.records.size(), 1);
+            auto fields = parse(sink.records[0]);
+            EXPECT_EQ(fields.at("status"), "error");
+            EXPECT_EQ(fields.at("complete"), "true");
+            EXPECT_EQ(fields.at("failed_keys"), "1");
+            for (const auto* stage : stages) EXPECT_EQ(fields.count(stage), 1);
+        }
+
+        config.prefer_alloc_in_same_node = true;
+        config.replica_num = 2;
+        for (bool upsert : {false, true}) {
+            BatchWriteTimingCaptureSink sink;
+            auto results = upsert ? test_client_->BatchUpsert(keys, slices, config)
+                                  : test_client_->BatchPut(keys, slices, config);
+            ASSERT_EQ(results.size(), 1);
+            ASSERT_FALSE(results[0]);
+            EXPECT_EQ(results[0].error(), ErrorCode::INVALID_PARAMS);
+            ASSERT_EQ(sink.records.size(), 1);
+            auto fields = parse(sink.records[0]);
+            EXPECT_EQ(fields.at("keys"), "1");
+            EXPECT_EQ(fields.at("bytes"), std::to_string(value.size()));
+            EXPECT_EQ(fields.at("status"), "error");
+            EXPECT_EQ(fields.at("complete"), "false");
+            EXPECT_EQ(fields.at("timing_scope"), "prefer_same_node_not_started");
+            EXPECT_EQ(fields.at("phase_status"), "not_started");
+            EXPECT_EQ(fields.count("total_us"), 0);
+            for (const auto* stage : stages) EXPECT_EQ(fields.count(stage), 0);
+        }
+    }
+    client_buffer_allocator_->deallocate(buffer, value.size());
 }
 
 // Test heavy workload operations
