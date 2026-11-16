@@ -29,6 +29,36 @@ make -j
 sudo make install
 ```
 
+### TTFT instrumentation branch: replace the runtime wheel
+
+On Linux, stop the target vLLM workers and source the same CANN environment used
+by serving. Existing master processes and dependency installation scripts are not
+modified. Keep local changes to `dependencies.sh`; do not reset the checkout.
+
+From this instrumentation checkout, using the serving virtual environment:
+
+```bash
+uv run --no-project /path/to/runtime/.venv/bin/python scripts/install_ttft_native.py \
+  --cache /path/to/existing/build/CMakeCache.txt --jobs 4
+```
+
+The installer reads the existing feature/toolchain options, builds a wheel in a
+new directory, backs up the installed Mooncake distribution, installs without
+changing dependencies, and checks loaded native libraries. A temporary loopback
+master verifies two registered-buffer PUT/GET payloads and all four successful
+`BatchPutTiming` phases. This TCP smoke does not validate NPU transport or model
+output. A failed installation or smoke restores the prior package files.
+
+The console prints the evidence directory and an explicit rollback command.
+Restart the vLLM workers after success. For P-side save diagnostics, update the
+P-side runtime; D only needs this native update if its own save logs are required.
+The paired Ascend dense address/metadata fix still requires both P and D updates.
+
+If no old CMake cache exists, explicitly choose `--transport ascend-direct` or
+`--transport ascend`; add dependency paths with repeated `--cmake KEY=VALUE`.
+The script never runs `dependencies.sh`, uses sudo, or clears a running store.
+
+
 ### Build with VRAM Segment
 
 To enable VRAM Segment, install CUDA toolkit and build Mooncake with
