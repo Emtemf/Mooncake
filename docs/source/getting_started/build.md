@@ -42,6 +42,15 @@ uv run --no-project /path/to/runtime/.venv/bin/python scripts/install_ttft_nativ
   --cache /path/to/existing/build/CMakeCache.txt --jobs 4
 ```
 
+For a serving container that uses its base Python instead of a virtual
+environment, use that interpreter and explicitly add `--container`. This targets
+the container environment; it does not create a different runtime:
+
+```bash
+uv run --no-project /path/to/serving/python scripts/install_ttft_native.py \
+  --container --cache /path/to/existing/build/CMakeCache.txt
+```
+
 The installer reads the existing feature/toolchain options, builds a wheel in a
 new directory, backs up the installed Mooncake distribution, installs without
 changing dependencies, and checks loaded native libraries. A temporary loopback

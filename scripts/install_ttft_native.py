@@ -32,6 +32,13 @@ def run(args, **kwargs):
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
 
 
+def pip_command(action):
+    command = ["uv", "pip", action, "--python", sys.executable]
+    if sys.prefix == sys.base_prefix:
+        command.append("--system")
+    return command
+
+
 def validate_timing(text):
     lines = [line for line in text.splitlines() if "[BatchPutTiming]" in line]
     if not any(
@@ -145,7 +152,7 @@ def restore(destination):
     except importlib.metadata.PackageNotFoundError:
         pass
     else:
-        run(["uv", "pip", "uninstall", "--python", sys.executable, DIST])
+        run([*pip_command("uninstall"), DIST])
     with tarfile.open(destination / "previous.tar.gz") as archive:
         for member in archive.getmembers():
             if not member.isfile() or not (prefix / member.name).resolve().is_relative_to(prefix):
@@ -228,6 +235,7 @@ def main():
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--cmake", action="append", default=[], help="Extra CMake KEY=VALUE; repeat as needed")
     parser.add_argument("--rollback", type=Path)
+    parser.add_argument("--container", action="store_true", help="Allow replacement in this container's non-venv Python")
     parser.add_argument("--probe", action="store_true")
     parser.add_argument("--smoke-client", type=int)
     args = parser.parse_args()
@@ -235,8 +243,10 @@ def main():
         return probe()
     if args.smoke_client:
         return smoke_client(args.smoke_client)
-    if sys.platform != "linux" or sys.prefix == sys.base_prefix:
-        parser.error("Run on Linux with uv run --no-project /path/to/runtime/.venv/bin/python")
+    if sys.platform != "linux":
+        parser.error("This installer requires Linux")
+    if sys.prefix == sys.base_prefix and not args.container:
+        parser.error("Use the serving virtual environment, or explicitly pass --container in your serving container")
     if not shutil.which("uv"):
         parser.error("uv must be on PATH")
     if args.rollback:
@@ -288,8 +298,8 @@ def main():
     try:
         previous = json.loads((destination / "backup.json").read_text())["distribution"]
         if previous != DIST:
-            run(["uv", "pip", "uninstall", "--python", sys.executable, previous])
-        run(["uv", "pip", "install", "--python", sys.executable, "--reinstall", "--no-deps", wheels[0]])
+            run([*pip_command("uninstall"), previous])
+        run([*pip_command("install"), "--reinstall", "--no-deps", wheels[0]])
         with (destination / "loaded-library.log").open("w") as log:
             run([sys.executable, __file__, "--probe"], cwd=destination,
                 stdout=log, stderr=subprocess.STDOUT, timeout=45)
@@ -300,7 +310,8 @@ def main():
     print(f"PASS: build/install, loaded native timing, TCP PUT/GET and four-phase logs. Evidence: {destination}")
     print("This is a local TCP smoke, not Ascend RDMA/HCCS or model-output validation.")
     print("Restart vLLM workers so they load the new library. Existing master was not touched.")
-    print(f"Rollback: uv run --no-project {sys.executable} {destination / 'installer.py'} --rollback {destination}")
+    container_flag = " --container" if args.container else ""
+    print(f"Rollback: uv run --no-project {sys.executable} {destination / 'installer.py'}{container_flag} --rollback {destination}")
 
 
 if __name__ == "__main__":
